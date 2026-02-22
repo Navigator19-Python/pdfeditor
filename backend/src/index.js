@@ -94,6 +94,7 @@ app.post("/export/docx", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
+app.use("/onlyoffice", onlyofficeRouter);
 app.listen(PORT, () => console.log(`Backend listening on :${PORT}`));
 
 function safeFileName(name) {
