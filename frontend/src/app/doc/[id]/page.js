@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { watchAuth } from "../../../lib/auth";
 import { db, storage } from "../../../lib/firebase";
@@ -19,11 +19,14 @@ const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL;
 export default function DocPage() {
   const { id } = useParams();
   const router = useRouter();
+
   const [user, setUser] = useState(undefined);
   const [title, setTitle] = useState("Untitled");
   const [importMeta, setImportMeta] = useState(null);
-  const [loadedHtml, setLoadedHtml] = useState("");
-  const [status, setStatus] = useState("Loading...");
+  const [loadedBodyHtml, setLoadedBodyHtml] = useState("");
+  const [status, setStatus] = useState("Loading…");
+  const [zoom, setZoom] = useState(1);
+
   const saveTimer = useRef(null);
   const lastSaved = useRef("");
 
@@ -40,19 +43,14 @@ export default function DocPage() {
 
     (async () => {
       const snap = await getDoc(doc(db, "docs", id));
-      if (!snap.exists()) {
-        router.push("/dashboard");
-        return;
-      }
+      if (!snap.exists()) return router.push("/dashboard");
+
       const data = snap.data();
-      if (data.ownerUid !== user.uid) {
-        router.push("/dashboard");
-        return;
-      }
+      if (data.ownerUid !== user.uid) return router.push("/dashboard");
 
       setTitle(data.title || "Untitled");
       setImportMeta(data.importMeta || null);
-      setLoadedHtml(extractBodyHtml(data.html || ""));
+      setLoadedBodyHtml(extractBodyHtml(data.html || ""));
       setStatus("Ready");
     })().catch((e) => {
       console.error(e);
@@ -60,62 +58,66 @@ export default function DocPage() {
     });
   }, [user, id, router]);
 
-  const editor = useEditor({
-    extensions: [
-      StarterKit,
-      Underline,
-      Link.configure({ openOnClick: false }),
-      TextAlign.configure({ types: ["heading", "paragraph"] }),
-      Image.configure({ inline: false })
-    ],
-    content: loadedHtml || "<p>Loading...</p>",
-    onUpdate: ({ editor }) => {
-      setStatus("Editing...");
-      scheduleSave(editor.getHTML());
-    }
-  }, [loadedHtml]);
+  const editor = useEditor(
+    {
+      extensions: [
+        StarterKit,
+        Underline,
+        Link.configure({ openOnClick: false }),
+        TextAlign.configure({ types: ["heading", "paragraph"] }),
+        Image.configure({ inline: false })
+      ],
+      content: loadedBodyHtml || "<p>Loading…</p>",
+      onUpdate: ({ editor }) => {
+        setStatus("Saving…");
+        scheduleSave(editor.getHTML());
+      }
+    },
+    [loadedBodyHtml]
+  );
 
-  function scheduleSave(htmlBody) {
+  function scheduleSave(bodyHtml) {
     if (!user) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
 
     saveTimer.current = setTimeout(async () => {
       try {
-        // avoid saving identical content repeatedly
-        if (lastSaved.current === htmlBody) {
+        if (lastSaved.current === bodyHtml) {
           setStatus("Saved");
           return;
         }
-        lastSaved.current = htmlBody;
+        lastSaved.current = bodyHtml;
 
-        const fullHtml = wrapAsFullHtml(htmlBody);
+        const fullHtml = wrapAsFullHtml(bodyHtml);
+
         await updateDoc(doc(db, "docs", id), {
           title,
           html: fullHtml,
           updatedAt: serverTimestamp()
         });
+
         setStatus("Saved");
       } catch (e) {
         console.error(e);
         setStatus("Save failed");
       }
-    }, 600);
+    }, 700);
   }
 
   async function uploadImageAndInsert(file) {
     if (!user || !editor) return;
-    setStatus("Uploading image...");
+    setStatus("Uploading image…");
     const path = `images/${user.uid}/${Date.now()}_${file.name}`;
     const fileRef = ref(storage, path);
     await uploadBytes(fileRef, file);
     const url = await getDownloadURL(fileRef);
     editor.chain().focus().setImage({ src: url }).run();
-    setStatus("Image added");
+    setStatus("Saved");
   }
 
   async function exportPdf() {
     if (!editor) return;
-    setStatus("Exporting PDF...");
+    setStatus("Exporting PDF…");
     const html = wrapAsExportHtml(editor.getHTML());
 
     const r = await fetch(`${BACKEND}/export/pdf`, {
@@ -124,15 +126,18 @@ export default function DocPage() {
       body: JSON.stringify({ title, html })
     });
 
-    if (!r.ok) { setStatus("PDF export failed"); return; }
+    if (!r.ok) {
+      setStatus("PDF export failed");
+      return;
+    }
     const blob = await r.blob();
     downloadBlob(blob, `${safeFileName(title)}.pdf`);
-    setStatus("PDF downloaded");
+    setStatus("Saved");
   }
 
   async function exportDocx() {
     if (!editor) return;
-    setStatus("Exporting DOCX...");
+    setStatus("Exporting DOCX…");
     const html = wrapAsExportHtml(editor.getHTML());
 
     const r = await fetch(`${BACKEND}/export/docx`, {
@@ -141,101 +146,161 @@ export default function DocPage() {
       body: JSON.stringify({ title, html })
     });
 
-    if (!r.ok) { setStatus("DOCX export failed"); return; }
+    if (!r.ok) {
+      setStatus("DOCX export failed");
+      return;
+    }
     const blob = await r.blob();
     downloadBlob(blob, `${safeFileName(title)}.docx`);
-    setStatus("DOCX downloaded");
+    setStatus("Saved");
   }
 
-  if (user === undefined) return <div style={{ padding: 24 }}>Loading...</div>;
+  if (user === undefined) return <div style={{ padding: 24 }}>Loading…</div>;
 
   return (
-    <div style={{ padding: 18, maxWidth: 1100, margin: "0 auto" }}>
-      <div style={topBar}>
-        <button style={btnGhost} onClick={() => router.push("/dashboard")}>← Back</button>
-
-        <input
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          onBlur={() => editor && scheduleSave(editor.getHTML())}
-          style={titleInput}
-        />
-
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <span style={{ color: "#666", fontSize: 13 }}>{status}</span>
-
-          <label style={btnSecondary}>
-            + Image
+    <div style={styles.app}>
+      {/* Top app bar (Docs-like) */}
+      <header style={styles.topBar}>
+        <div style={styles.leftTop}>
+          <button style={styles.iconBtn} onClick={() => router.push("/dashboard")} title="Back">
+            ←
+          </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <input
-              type="file"
-              accept="image/*"
-              style={{ display: "none" }}
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) uploadImageAndInsert(f).catch(console.error);
-                e.target.value = "";
-              }}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onBlur={() => editor && scheduleSave(editor.getHTML())}
+              style={styles.titleInput}
             />
-          </label>
-
-          <button style={btnPrimary} onClick={exportPdf}>Export PDF</button>
-          <button style={btnSecondary} onClick={exportDocx}>Export DOCX</button>
+            <div style={styles.subText}>
+              {importMeta?.isProbablyScanned ? "⚠️ Imported (scanned?)" : "Document"} • {status}
+            </div>
+          </div>
         </div>
+
+        <div style={styles.rightTop}>
+          <ZoomControl zoom={zoom} setZoom={setZoom} />
+          <button style={styles.primaryBtn} onClick={exportPdf}>Export PDF</button>
+          <button style={styles.secondaryBtn} onClick={exportDocx}>Export DOCX</button>
+        </div>
+      </header>
+
+      {/* Toolbar (Docs-like) */}
+      <div style={styles.toolbar}>
+        <ToolBtn active={editor?.isActive("bold")} onClick={() => editor?.chain().focus().toggleBold().run()}>B</ToolBtn>
+        <ToolBtn active={editor?.isActive("italic")} onClick={() => editor?.chain().focus().toggleItalic().run()}>I</ToolBtn>
+        <ToolBtn active={editor?.isActive("underline")} onClick={() => editor?.chain().focus().toggleUnderline().run()}>U</ToolBtn>
+
+        <Divider />
+
+        <select
+          style={styles.select}
+          value={headingValue(editor)}
+          onChange={(e) => applyHeading(editor, e.target.value)}
+        >
+          <option value="p">Normal</option>
+          <option value="h1">Heading 1</option>
+          <option value="h2">Heading 2</option>
+          <option value="h3">Heading 3</option>
+        </select>
+
+        <Divider />
+
+        <ToolBtn onClick={() => editor?.chain().focus().setTextAlign("left").run()}>Left</ToolBtn>
+        <ToolBtn onClick={() => editor?.chain().focus().setTextAlign("center").run()}>Center</ToolBtn>
+        <ToolBtn onClick={() => editor?.chain().focus().setTextAlign("right").run()}>Right</ToolBtn>
+
+        <Divider />
+
+        <ToolBtn active={editor?.isActive("bulletList")} onClick={() => editor?.chain().focus().toggleBulletList().run()}>
+          • List
+        </ToolBtn>
+        <ToolBtn active={editor?.isActive("orderedList")} onClick={() => editor?.chain().focus().toggleOrderedList().run()}>
+          1. List
+        </ToolBtn>
+
+        <Divider />
+
+        <label style={styles.secondaryBtn}>
+          + Image
+          <input
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) uploadImageAndInsert(f).catch(console.error);
+              e.target.value = "";
+            }}
+          />
+        </label>
       </div>
 
-      {importMeta?.isProbablyScanned ? (
-        <div style={notice}>
-          ⚠️ This looks like a scanned PDF. Text may not be fully editable without OCR.
+      {/* Canvas (page view) */}
+      <main style={styles.canvas}>
+        <div style={{ ...styles.paperWrap, transform: `scale(${zoom})` }}>
+          <div style={styles.paper}>
+            <EditorContent editor={editor} />
+          </div>
         </div>
-      ) : null}
-
-      <Toolbar editor={editor} />
-
-      <div style={editorWrap}>
-        <div style={paper}>
-          <EditorContent editor={editor} />
-        </div>
-      </div>
+      </main>
     </div>
   );
 }
 
-function Toolbar({ editor }) {
-  if (!editor) return null;
-
-  const B = ({ onClick, active, children }) => (
+function ToolBtn({ children, onClick, active }) {
+  return (
     <button
       onClick={onClick}
       style={{
-        padding: "8px 10px",
-        borderRadius: 10,
-        border: "1px solid #ddd",
-        background: active ? "black" : "white",
-        color: active ? "white" : "black",
-        cursor: "pointer"
+        ...styles.toolBtn,
+        background: active ? "#111" : "white",
+        color: active ? "white" : "#111",
+        borderColor: active ? "#111" : "#d1d5db"
       }}
     >
       {children}
     </button>
   );
+}
 
+function Divider() {
+  return <div style={{ width: 1, height: 22, background: "#e5e7eb" }} />;
+}
+
+function ZoomControl({ zoom, setZoom }) {
+  const options = [0.5, 0.75, 1, 1.25, 1.5];
   return (
-    <div style={toolbar}>
-      <B onClick={() => editor.chain().focus().toggleBold().run()} active={editor.isActive("bold")}>B</B>
-      <B onClick={() => editor.chain().focus().toggleItalic().run()} active={editor.isActive("italic")}>I</B>
-      <B onClick={() => editor.chain().focus().toggleUnderline().run()} active={editor.isActive("underline")}>U</B>
-      <B onClick={() => editor.chain().focus().toggleBulletList().run()} active={editor.isActive("bulletList")}>• List</B>
-      <B onClick={() => editor.chain().focus().toggleOrderedList().run()} active={editor.isActive("orderedList")}>1. List</B>
-
-      <B onClick={() => editor.chain().focus().setParagraph().run()} active={editor.isActive("paragraph")}>P</B>
-      <B onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} active={editor.isActive("heading", { level: 1 })}>H1</B>
-      <B onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()} active={editor.isActive("heading", { level: 2 })}>H2</B>
-
-      <B onClick={() => editor.chain().focus().setTextAlign("left").run()} active={editor.isActive({ textAlign: "left" })}>Left</B>
-      <B onClick={() => editor.chain().focus().setTextAlign("center").run()} active={editor.isActive({ textAlign: "center" })}>Center</B>
-      <B onClick={() => editor.chain().focus().setTextAlign("right").run()} active={editor.isActive({ textAlign: "right" })}>Right</B>
-    </div>
+    <select
+      style={styles.select}
+      value={zoom}
+      onChange={(e) => setZoom(parseFloat(e.target.value))}
+      title="Zoom"
+    >
+      {options.map((z) => (
+        <option key={z} value={z}>
+          {Math.round(z * 100)}%
+        </option>
+      ))}
+    </select>
   );
+}
+
+function headingValue(editor) {
+  if (!editor) return "p";
+  if (editor.isActive("heading", { level: 1 })) return "h1";
+  if (editor.isActive("heading", { level: 2 })) return "h2";
+  if (editor.isActive("heading", { level: 3 })) return "h3";
+  return "p";
+}
+
+function applyHeading(editor, v) {
+  if (!editor) return;
+  editor.chain().focus();
+  if (v === "p") editor.setParagraph().run();
+  if (v === "h1") editor.toggleHeading({ level: 1 }).run();
+  if (v === "h2") editor.toggleHeading({ level: 2 }).run();
+  if (v === "h3") editor.toggleHeading({ level: 3 }).run();
 }
 
 function extractBodyHtml(fullHtml) {
@@ -250,8 +315,9 @@ function wrapAsFullHtml(bodyHtml) {
 <head><meta charset="utf-8"/>
 <style>
   body { font-family: Arial, sans-serif; }
-  .page { background: white; border: 1px solid #e5e7eb; border-radius: 12px; padding: 32px; margin: 18px 0; min-height: 980px; }
-  p { line-height: 1.6; font-size: 14px; }
+  .ProseMirror { outline: none; }
+  p { line-height: 1.65; font-size: 14px; margin: 0 0 10px; }
+  h1,h2,h3 { margin: 14px 0 10px; }
   img { max-width: 100%; border-radius: 10px; }
 </style>
 </head>
@@ -263,12 +329,26 @@ function wrapAsFullHtml(bodyHtml) {
 }
 
 function wrapAsExportHtml(bodyHtml) {
-  // export should keep stable paper layout
-  return wrapAsFullHtml(`
-    <div class="page">
-      ${bodyHtml}
-    </div>
-  `);
+  return `
+<!doctype html>
+<html>
+<head><meta charset="utf-8"/>
+<style>
+  body { font-family: Arial, sans-serif; }
+  .page { width: 210mm; min-height: 297mm; padding: 18mm; box-sizing: border-box; }
+  .ProseMirror { outline: none; }
+  p { line-height: 1.65; font-size: 12pt; margin: 0 0 10px; }
+  h1 { font-size: 22pt; }
+  h2 { font-size: 16pt; }
+  h3 { font-size: 13pt; }
+  img { max-width: 100%; }
+</style>
+</head>
+<body>
+  <div class="page">${bodyHtml}</div>
+</body>
+</html>
+`.trim();
 }
 
 function downloadBlob(blob, filename) {
@@ -286,21 +366,107 @@ function safeFileName(name) {
   return (name || "document").replace(/[^\w\-]+/g, "_").slice(0, 80) || "document";
 }
 
-const topBar = { display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" };
-const titleInput = { flex: 1, minWidth: 180, padding: 10, borderRadius: 12, border: "1px solid #ddd", fontWeight: 700 };
-const btnPrimary = { padding: "10px 14px", borderRadius: 12, border: "none", background: "black", color: "white", cursor: "pointer" };
-const btnSecondary = { padding: "10px 14px", borderRadius: 12, border: "1px solid #111", background: "white", cursor: "pointer" };
-const btnGhost = { padding: "10px 12px", borderRadius: 12, border: "1px solid #ddd", background: "white", cursor: "pointer" };
+const styles = {
+  app: { minHeight: "100vh", background: "#f6f7fb" },
 
-const toolbar = { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 };
+  topBar: {
+    position: "sticky",
+    top: 0,
+    zIndex: 10,
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "10px 14px",
+    background: "white",
+    borderBottom: "1px solid #e5e7eb"
+  },
+  leftTop: { display: "flex", alignItems: "center", gap: 12, minWidth: 240, flex: 1 },
+  rightTop: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" },
 
-const notice = { marginTop: 12, background: "#fff3cd", border: "1px solid #ffeeba", padding: 12, borderRadius: 12, color: "#6b4e00" };
+  iconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    border: "1px solid #d1d5db",
+    background: "white",
+    cursor: "pointer"
+  },
+  titleInput: {
+    fontWeight: 800,
+    fontSize: 16,
+    border: "1px solid transparent",
+    outline: "none",
+    padding: "6px 8px",
+    borderRadius: 10,
+    width: "min(520px, 60vw)",
+    background: "#f6f7fb"
+  },
+  subText: { fontSize: 12, color: "#6b7280", paddingLeft: 8 },
 
-const editorWrap = { marginTop: 14 };
-const paper = {
-  background: "white",
-  borderRadius: 14,
-  padding: 22,
-  border: "1px solid #e5e7eb",
-  boxShadow: "0 10px 30px rgba(0,0,0,0.06)"
+  toolbar: {
+    position: "sticky",
+    top: 58,
+    zIndex: 9,
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    padding: "10px 14px",
+    background: "white",
+    borderBottom: "1px solid #e5e7eb"
+  },
+
+  toolBtn: {
+    padding: "8px 10px",
+    borderRadius: 10,
+    border: "1px solid #d1d5db",
+    background: "white",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 13
+  },
+
+  select: {
+    padding: "8px 10px",
+    borderRadius: 10,
+    border: "1px solid #d1d5db",
+    background: "white"
+  },
+
+  primaryBtn: {
+    padding: "10px 14px",
+    borderRadius: 12,
+    border: "none",
+    background: "black",
+    color: "white",
+    cursor: "pointer",
+    fontWeight: 700
+  },
+  secondaryBtn: {
+    padding: "10px 14px",
+    borderRadius: 12,
+    border: "1px solid #111",
+    background: "white",
+    cursor: "pointer",
+    fontWeight: 700
+  },
+
+  canvas: {
+    display: "grid",
+    placeItems: "start center",
+    padding: "22px 14px 60px"
+  },
+
+  paperWrap: {
+    transformOrigin: "top center"
+  },
+  paper: {
+    width: "min(900px, calc(100vw - 28px))",
+    minHeight: 1050,
+    background: "white",
+    border: "1px solid #e5e7eb",
+    borderRadius: 14,
+    padding: 28,
+    boxShadow: "0 14px 40px rgba(0,0,0,0.08)"
+  }
 };
