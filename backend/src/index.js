@@ -9,7 +9,7 @@ import { onlyofficeRouter } from "./onlyoffice/routes.js";
 const app = express();
 
 app.use(cors({ origin: true }));
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "50mb" }));
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
