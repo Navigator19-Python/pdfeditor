@@ -4,6 +4,7 @@ import { z } from "zod";
 import { convertPdfToHtml } from "./pdf/convertPdfToHtml.js";
 import { renderHtmlToPdf } from "./export/renderHtmlToPdf.js";
 import { renderHtmlToDocx } from "./export/renderHtmlToDocx.js";
+import { onlyofficeRouter } from "./onlyoffice/routes.js";
 
 const app = express();
 
