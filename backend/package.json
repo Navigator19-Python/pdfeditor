@@ -1,5 +1,11 @@
 {
+  "name": "pdf-onlyoffice-backend",
+  "version": "1.0.0",
   "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "docx": "^8.5.0",
