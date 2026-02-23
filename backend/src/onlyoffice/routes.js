@@ -9,6 +9,8 @@ export const onlyofficeRouter = express.Router();
 /**
  * POST /onlyoffice/config
  * Returns ONLYOFFICE DocEditor config + JWT token (if enabled).
+ * IMPORTANT: we explicitly enable edit permissions + mode="edit"
+ * to avoid "You do not have rights" popup.
  */
 onlyofficeRouter.post("/config", async (req, res) => {
   try {
@@ -18,17 +20,32 @@ onlyofficeRouter.post("/config", async (req, res) => {
     }
 
     const callbackUrl = `${process.env.PUBLIC_BASE_URL}/onlyoffice/callback`;
-    const key = `${docId}:${Date.now()}`; // must be unique per open/version
+    const key = `${docId}:${Date.now()}`; // unique per open/version
 
     const config = {
       document: {
         fileType, // "docx"
         key,
         title: title || "Document",
-        url: fileUrl
+        url: fileUrl,
+
+        // ✅ ensure edit rights exist
+        permissions: {
+          edit: true,
+          download: true,
+          print: true,
+          review: true,
+          comment: true,
+          fillForms: true,
+          copy: true
+        }
       },
+
       documentType: "text",
+
       editorConfig: {
+        // ✅ force edit mode
+        mode: "edit",
         callbackUrl,
         user: {
           id: user?.id || "1",
@@ -86,7 +103,7 @@ onlyofficeRouter.post("/create-blank", async (req, res) => {
 
     const [signedUrl] = await file.getSignedUrl({
       action: "read",
-      expires: Date.now() + 1000 * 60 * 60 * 24 // 24h
+      expires: Date.now() + 1000 * 60 * 60 * 24 * 7 // 7 days (more stable)
     });
 
     await admin.firestore().collection("docs").doc(docId).set(
@@ -112,8 +129,6 @@ onlyofficeRouter.post("/create-blank", async (req, res) => {
  * POST /onlyoffice/convert/pdf-to-docx
  * Converts a PDF (URL) -> DOCX using ONLYOFFICE Conversion API:
  * POST {ONLYOFFICE_URL}/converter
- *
- * Note: error code -7 means input error (bad request payload).
  */
 onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
   try {
@@ -122,15 +137,13 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
       return res.status(400).json({ ok: false, error: "docId and pdfUrl required" });
     }
 
-    const onlyofficeUrl = process.env.ONLYOFFICE_URL; // e.g. http://EC2_IP:8080
+    const onlyofficeUrl = process.env.ONLYOFFICE_URL; // e.g. https://....trycloudflare.com OR http://EC2_IP:8080
     if (!onlyofficeUrl) {
       return res.status(500).json({ ok: false, error: "Missing ONLYOFFICE_URL env var" });
     }
 
-    // key must be unique; keep it stable during polling
     const key = `${docId}-pdf2docx-${Date.now()}`;
 
-    // Minimal payload per ONLYOFFICE Conversion API
     const payload = {
       async: true,
       url: pdfUrl,
@@ -140,7 +153,7 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
       title: title || "source.pdf"
     };
 
-    // JWT: your DocumentServer says header is Authorization
+    // JWT: DocumentServer expects Authorization header (Bearer)
     const secret = process.env.ONLYOFFICE_JWT_SECRET;
     let authHeader = {};
     if (secret) {
@@ -148,9 +161,9 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
       authHeader = { Authorization: `Bearer ${token}` };
     }
 
-    const converterUrl = `${onlyofficeUrl}/converter`;
+    const converterUrl = `${String(onlyofficeUrl).replace(/\/+$/, "")}/converter`;
 
-    // Poll until endConvert=true (up to ~60s)
+    // Poll until endConvert=true (~60s)
     let result = null;
     for (let i = 0; i < 40; i++) {
       const r = await fetch(converterUrl, {
@@ -205,7 +218,7 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
     }
     const buf = Buffer.from(await docxResp.arrayBuffer());
 
-    // Upload converted DOCX to Firebase Storage stable path
+    // Upload DOCX to Firebase Storage stable path
     const admin = getFirebaseAdmin();
     const bucket = admin.storage().bucket();
 
@@ -220,7 +233,7 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
     // Signed URL for ONLYOFFICE to read
     const [signedUrl] = await file.getSignedUrl({
       action: "read",
-      expires: Date.now() + 1000 * 60 * 60 * 24
+      expires: Date.now() + 1000 * 60 * 60 * 24 * 7 // 7 days
     });
 
     // Update Firestore
@@ -287,7 +300,7 @@ onlyofficeRouter.post("/callback", async (req, res) => {
       // Signed URL for reading
       const [signedUrl] = await file.getSignedUrl({
         action: "read",
-        expires: Date.now() + 1000 * 60 * 60 * 24
+        expires: Date.now() + 1000 * 60 * 60 * 24 * 7 // 7 days
       });
 
       // Update Firestore with latest URL
