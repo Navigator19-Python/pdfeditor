@@ -5,15 +5,17 @@ import { useRouter } from "next/navigation";
 import { watchAuth } from "../../lib/auth";
 import { auth, db, storage } from "../../lib/firebase";
 import { signOut } from "firebase/auth";
-import { addDoc, collection, serverTimestamp, getDocs, query, where, orderBy } from "firebase/firestore";
-import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { addDoc, collection, getDocs, orderBy, query, serverTimestamp, updateDoc, where, doc as docRef } from "firebase/firestore";
+import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
+
+const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL;
 
 export default function Dashboard() {
   const router = useRouter();
   const [user, setUser] = useState(undefined);
   const [docs, setDocs] = useState([]);
-  const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
 
   useEffect(() => {
     const unsub = watchAuth((u) => {
@@ -23,38 +25,54 @@ export default function Dashboard() {
     return () => unsub();
   }, [router]);
 
+  async function refresh(u) {
+    const q = query(
+      collection(db, "docs"),
+      where("ownerUid", "==", u.uid),
+      orderBy("updatedAt", "desc")
+    );
+    const snap = await getDocs(q);
+    setDocs(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  }
+
   useEffect(() => {
     if (!user) return;
-    (async () => {
-      const q = query(
-        collection(db, "docs"),
-        where("ownerUid", "==", user.uid),
-        orderBy("updatedAt", "desc")
-      );
-      const snap = await getDocs(q);
-      setDocs(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    })().catch(console.error);
+    refresh(user).catch(console.error);
   }, [user]);
 
-  async function createBlankDocx() {
-    // ONLYOFFICE works best with DOCX. We create a blank doc placeholder.
+  async function createBlank() {
     setBusy(true);
     setMsg("");
     try {
-      const docRef = await addDoc(collection(db, "docs"), {
+      // 1) Create doc record
+      const d = await addDoc(collection(db, "docs"), {
         ownerUid: user.uid,
         title: "Untitled",
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
-        onlyoffice: { docxUrl: null, docxPath: null }
+        onlyoffice: { docxPath: null, docxUrl: null }
       });
 
-      // We will upload a tiny blank docx file from backend later (better),
-      // but for now, require upload before opening.
-      router.push(`/onlyoffice/${docRef.id}`);
+      // 2) Ask backend to generate & upload a blank docx to Firebase Storage
+      const r = await fetch(`${BACKEND}/onlyoffice/create-blank`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ docId: d.id, title: "Untitled" })
+      });
+
+      if (!r.ok) throw new Error("create-blank failed");
+      const data = await r.json();
+
+      // 3) Update Firestore with docxUrl/path returned by backend
+      await updateDoc(docRef(db, "docs", d.id), {
+        onlyoffice: { docxPath: data.docxPath, docxUrl: data.docxUrl },
+        updatedAt: serverTimestamp()
+      });
+
+      router.push(`/onlyoffice/${d.id}`);
     } catch (e) {
       console.error(e);
-      setMsg("Failed to create document.");
+      setMsg("Failed to create blank doc. Check backend logs/env.");
     } finally {
       setBusy(false);
     }
@@ -65,22 +83,22 @@ export default function Dashboard() {
     setMsg("");
     try {
       if (!file.name.toLowerCase().endsWith(".docx")) {
-        setMsg("Please upload a .docx file (ONLYOFFICE edits DOCX best).");
+        setMsg("Upload a .docx file for best results.");
         setBusy(false);
         return;
       }
 
-      // 1) Create doc record
-      const docRef = await addDoc(collection(db, "docs"), {
+      // 1) Create Firestore doc
+      const docSnap = await addDoc(collection(db, "docs"), {
         ownerUid: user.uid,
         title: file.name.replace(/\.docx$/i, ""),
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
 
-      const docId = docRef.id;
+      const docId = docSnap.id;
 
-      // 2) Upload to Storage at fixed path (so callback can overwrite same file)
+      // 2) Upload to a stable path (backend callback overwrites this)
       const objectPath = `onlyoffice/${docId}/latest.docx`;
       const fileRef = ref(storage, objectPath);
 
@@ -90,17 +108,12 @@ export default function Dashboard() {
 
       const url = await getDownloadURL(fileRef);
 
-      // 3) Save URL in Firestore
-      // (Importantly: we store a URL for ONLYOFFICE to fetch)
-      await (await import("firebase/firestore")).updateDoc(
-        (await import("firebase/firestore")).doc(db, "docs", docId),
-        {
-          onlyoffice: { docxUrl: url, docxPath: objectPath },
-          updatedAt: serverTimestamp()
-        }
-      );
+      // 3) Save docxUrl/path
+      await updateDoc(docRef(db, "docs", docId), {
+        onlyoffice: { docxPath: objectPath, docxUrl: url },
+        updatedAt: serverTimestamp()
+      });
 
-      // 4) Open ONLYOFFICE editor
       router.push(`/onlyoffice/${docId}`);
     } catch (e) {
       console.error(e);
@@ -110,7 +123,7 @@ export default function Dashboard() {
     }
   }
 
-  if (user === undefined) return <div style={{ padding: 24 }}>Loading...</div>;
+  if (user === undefined) return <div style={{ padding: 24 }}>Loading…</div>;
 
   return (
     <div style={{ padding: 24, maxWidth: 980, margin: "0 auto" }}>
@@ -120,12 +133,12 @@ export default function Dashboard() {
       </div>
 
       <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
-        <button disabled={busy} onClick={createBlankDocx} style={btnSecondary}>
-          + New (upload DOCX after)
+        <button disabled={busy} onClick={createBlank} style={btnSecondary}>
+          {busy ? "Working…" : "+ New Blank Document"}
         </button>
 
         <label style={btnPrimary}>
-          {busy ? "Working..." : "Upload DOCX → Open"}
+          {busy ? "Working…" : "Upload DOCX → Open"}
           <input
             type="file"
             accept=".docx"
@@ -146,10 +159,11 @@ export default function Dashboard() {
           <div key={d.id} style={card} onClick={() => router.push(`/onlyoffice/${d.id}`)}>
             <div style={{ fontWeight: 700 }}>{d.title || "Untitled"}</div>
             <div style={{ color: "#666", fontSize: 13 }}>
-              {d.onlyoffice?.docxUrl ? "DOCX ready" : "Needs DOCX upload"}
+              {d.onlyoffice?.docxUrl ? "Ready" : "No DOCX yet"}
             </div>
           </div>
         ))}
+        {!docs.length ? <div style={{ color: "#666" }}>No documents yet.</div> : null}
       </div>
     </div>
   );
