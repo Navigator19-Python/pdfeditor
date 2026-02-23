@@ -20,16 +20,14 @@ onlyofficeRouter.post("/config", async (req, res) => {
     }
 
     const callbackUrl = `${process.env.PUBLIC_BASE_URL}/onlyoffice/callback`;
-    const key = `${docId}:${Date.now()}`; // unique per open/version
+    const key = `${docId}:${Date.now()}`;
 
     const config = {
       document: {
-        fileType, // "docx"
+        fileType,
         key,
         title: title || "Document",
         url: fileUrl,
-
-        // ✅ ensure edit rights exist
         permissions: {
           edit: true,
           download: true,
@@ -40,22 +38,29 @@ onlyofficeRouter.post("/config", async (req, res) => {
           copy: true
         }
       },
-
       documentType: "text",
-
       editorConfig: {
-        // ✅ force edit mode
         mode: "edit",
         callbackUrl,
         user: {
-          id: user?.id || "1",
-          name: user?.name || "User"
+          id: String(user?.id || "1"),
+          name: String(user?.name || "User")
         }
       }
     };
 
     const secret = process.env.ONLYOFFICE_JWT_SECRET;
-    if (secret) config.token = signJwt(config, secret);
+
+    // ✅ IMPORTANT: wrap inside { payload: ... }
+    if (secret) {
+      const wrapped = { payload: config };
+      const token = signJwt(wrapped, secret);
+
+      // Put token in all common places (covers more DS versions)
+      config.token = token;
+      config.document.token = token;
+      config.editorConfig.token = token;
+    }
 
     return res.json(config);
   } catch (e) {
