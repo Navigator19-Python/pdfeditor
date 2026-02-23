@@ -2,12 +2,12 @@ import express from "express";
 import crypto from "crypto";
 import fetch from "node-fetch";
 import { getFirebaseAdmin } from "./firebaseAdmin.js";
+// import { blankDocxBuffer } from "./blankDocx.js"; // optional
 
 export const onlyofficeRouter = express.Router();
 
 /**
- * Frontend calls this to get ONLYOFFICE config.
- * We embed docId inside "key" so callback knows where to save.
+ * Create config for DocsAPI.DocEditor
  */
 onlyofficeRouter.post("/config", async (req, res) => {
   const { docId, fileUrl, fileType, title, user } = req.body || {};
@@ -17,13 +17,13 @@ onlyofficeRouter.post("/config", async (req, res) => {
 
   const callbackUrl = `${process.env.PUBLIC_BASE_URL}/onlyoffice/callback`;
 
-  // key MUST change when a new version is created (add timestamp)
+  // key must change each open/version
   const key = `${docId}:${Date.now()}`;
 
   const config = {
     document: {
-      fileType,          // "docx"
-      key,               // we parse docId from this in callback
+      fileType,
+      key,
       title: title || "Document",
       url: fileUrl
     },
@@ -37,7 +37,6 @@ onlyofficeRouter.post("/config", async (req, res) => {
     }
   };
 
-  // JWT token for config
   const secret = process.env.ONLYOFFICE_JWT_SECRET;
   if (secret) config.token = signJwt(config, secret);
 
@@ -45,8 +44,26 @@ onlyofficeRouter.post("/config", async (req, res) => {
 });
 
 /**
- * ONLYOFFICE calls this when saving.
- * We verify JWT using Authorization header (your config).
+ * OPTIONAL: create a blank docx in Firebase Storage.
+ * If you don’t want this, delete this endpoint and the frontend "New Blank" button.
+ */
+onlyofficeRouter.post("/create-blank", async (req, res) => {
+  try {
+    const { docId } = req.body || {};
+    if (!docId) return res.status(400).json({ error: "docId required" });
+
+    // If you implement blankDocxBuffer or docx-lib generator:
+    // const buf = blankDocxBuffer("Untitled");
+    // For now, respond with error so you don't break builds if blankDocx is not set.
+    return res.status(501).json({ error: "Blank DOCX generator not enabled. Upload a DOCX instead." });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Failed to create blank." });
+  }
+});
+
+/**
+ * ONLYOFFICE callback: save updated doc
  */
 onlyofficeRouter.post("/callback", async (req, res) => {
   try {
@@ -61,17 +78,17 @@ onlyofficeRouter.post("/callback", async (req, res) => {
     // 2 = MustSave, 6 = MustForceSave
     if (status === 2 || status === 6) {
       const downloadUrl = body.url;
-      const key = body.key; // this equals our key: "docId:timestamp"
+      const key = body.key; // "docId:timestamp"
       if (!downloadUrl || !key) return res.json({ error: 0 });
 
       const docId = key.split(":")[0];
 
-      // Download updated docx from ONLYOFFICE
+      // Download updated DOCX from ONLYOFFICE
       const r = await fetch(downloadUrl);
-      if (!r.ok) throw new Error(`Failed download updated doc: ${r.status}`);
+      if (!r.ok) throw new Error(`Failed to download updated file: ${r.status}`);
       const buf = Buffer.from(await r.arrayBuffer());
 
-      // Upload back to Firebase Storage
+      // Upload to Firebase Storage stable path
       const admin = getFirebaseAdmin();
       const bucket = admin.storage().bucket();
 
@@ -80,40 +97,37 @@ onlyofficeRouter.post("/callback", async (req, res) => {
 
       await file.save(buf, {
         contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        resumable: false,
-        public: false
+        resumable: false
       });
 
-      // Create a signed URL for frontend to open again (optional)
+      // Signed URL for ONLYOFFICE to load next time
       const [signedUrl] = await file.getSignedUrl({
         action: "read",
-        expires: Date.now() + 1000 * 60 * 60 * 24 // 24h
+        expires: Date.now() + 1000 * 60 * 60 * 24
       });
 
-      // Update Firestore doc with latest docx URL (optional)
+      // Update Firestore doc with latest URL
       await admin.firestore().collection("docs").doc(docId).set(
         {
           onlyoffice: {
             docxPath: objectPath,
             docxUrl: signedUrl,
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          }
+          },
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
         },
         { merge: true }
       );
-
-      console.log("Saved updated docx to Firebase:", objectPath);
     }
 
     return res.json({ error: 0 });
   } catch (e) {
-    console.error("ONLYOFFICE callback error:", e);
+    console.error("Callback error:", e);
     return res.status(500).json({ error: 1 });
   }
 });
 
-/* ---------- JWT helpers (HS256) ---------- */
-
+/* ---- JWT helpers (HS256) ---- */
 function signJwt(payloadObj, secret) {
   const header = { alg: "HS256", typ: "JWT" };
   const b64 = (obj) =>
@@ -139,7 +153,7 @@ function signJwt(payloadObj, secret) {
 }
 
 function verifyOnlyOfficeJwt(req, secret) {
-  // Your ONLYOFFICE says JWT header is Authorization
+  // Your ONLYOFFICE says header is Authorization
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
   if (!token) return false;
