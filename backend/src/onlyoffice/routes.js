@@ -1,5 +1,5 @@
 // backend/src/onlyoffice/routes.js
-// CLEAN + STABLE KEY + FORCE EDIT MODE (JWT OFF)
+// JWT OFF + STABLE KEY + NO FORCESAVE + INSTANT CALLBACK RESPONSE (prevents "no rights" popup)
 
 import express from "express";
 import fetch from "node-fetch";
@@ -10,8 +10,7 @@ export const onlyofficeRouter = express.Router();
 
 /**
  * POST /onlyoffice/config
- * Frontend sends: { docId, fileUrl, fileType, title, user, version }
- * We use a STABLE key: `${docId}:${version}` to avoid rights/state issues.
+ * Body: { docId, fileUrl, fileType, title, user, version }
  */
 onlyofficeRouter.post("/config", async (req, res) => {
   try {
@@ -22,7 +21,7 @@ onlyofficeRouter.post("/config", async (req, res) => {
 
     const callbackUrl = `${process.env.PUBLIC_BASE_URL}/onlyoffice/callback`;
 
-    // ✅ Stable key (do NOT use Date.now() here)
+    // ✅ stable key (avoid Date.now() here)
     const stableVersion = String(version || "v1");
     const key = `${docId}:${stableVersion}`;
 
@@ -49,10 +48,10 @@ onlyofficeRouter.post("/config", async (req, res) => {
         user: {
           id: String(user?.id || "1"),
           name: String(user?.name || "User")
-        },
-        customization: {
-          forcesave: true
         }
+
+        // ✅ IMPORTANT: DO NOT enable forcesave here
+        // customization: { forcesave: true }  <-- remove
       }
     };
 
@@ -68,7 +67,6 @@ onlyofficeRouter.post("/config", async (req, res) => {
 
 /**
  * POST /onlyoffice/create-blank
- * Creates onlyoffice/{docId}/latest.docx in Firebase Storage and sets Firestore.
  */
 onlyofficeRouter.post("/create-blank", async (req, res) => {
   try {
@@ -128,8 +126,8 @@ onlyofficeRouter.post("/create-blank", async (req, res) => {
 
 /**
  * POST /onlyoffice/convert/pdf-to-docx
- * Converts PDF -> DOCX using ONLYOFFICE Conversion API.
- * ONLYOFFICE_URL should be reachable from Render (use EC2 public IP for backend calls).
+ * ONLYOFFICE_URL should be reachable from Render.
+ * Recommended: http://EC2_PUBLIC_IP:8080 (server-to-server)
  */
 onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
   try {
@@ -231,57 +229,62 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
 
 /**
  * POST /onlyoffice/callback
- * Saves changes back to Firebase Storage (JWT OFF, no verification).
+ * ✅ Instant response to DocumentServer to avoid timeout and "no rights" popup.
+ * Then performs saving work in the background.
  */
 onlyofficeRouter.post("/callback", async (req, res) => {
+  // ✅ respond immediately (super important)
+  res.json({ error: 0 });
+
   try {
     const body = req.body || {};
     const status = body.status;
 
-    if (status === 2 || status === 6) {
-      const downloadUrl = body.url;
-      const key = body.key;
-      if (!downloadUrl || !key) return res.json({ error: 0 });
+    // Save only when required
+    if (status !== 2 && status !== 6) return;
 
-      const docId = String(key).split(":")[0];
+    const downloadUrl = body.url;
+    const key = body.key;
+    if (!downloadUrl || !key) return;
 
-      const r = await fetch(downloadUrl);
-      if (!r.ok) throw new Error(`Failed to download updated file: ${r.status}`);
-      const buf = Buffer.from(await r.arrayBuffer());
+    const docId = String(key).split(":")[0];
 
-      const admin = getFirebaseAdmin();
-      const bucket = admin.storage().bucket();
+    const r = await fetch(downloadUrl);
+    if (!r.ok) {
+      console.error("Callback download failed:", r.status);
+      return;
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
 
-      const objectPath = `onlyoffice/${docId}/latest.docx`;
-      const file = bucket.file(objectPath);
+    const admin = getFirebaseAdmin();
+    const bucket = admin.storage().bucket();
 
-      await file.save(buf, {
-        contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        resumable: false
-      });
+    const objectPath = `onlyoffice/${docId}/latest.docx`;
+    const file = bucket.file(objectPath);
 
-      const [signedUrl] = await file.getSignedUrl({
-        action: "read",
-        expires: Date.now() + 1000 * 60 * 60 * 24 * 7
-      });
+    await file.save(buf, {
+      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      resumable: false
+    });
 
-      await admin.firestore().collection("docs").doc(docId).set(
-        {
-          onlyoffice: {
-            docxPath: objectPath,
-            docxUrl: signedUrl,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-          },
+    const [signedUrl] = await file.getSignedUrl({
+      action: "read",
+      expires: Date.now() + 1000 * 60 * 60 * 24 * 7
+    });
+
+    await admin.firestore().collection("docs").doc(docId).set(
+      {
+        onlyoffice: {
+          docxPath: objectPath,
+          docxUrl: signedUrl,
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         },
-        { merge: true }
-      );
-    }
-
-    return res.json({ error: 0 });
+        updatedAt: admin.firestore.FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
   } catch (e) {
-    console.error("callback error:", e);
-    return res.status(500).json({ error: 1 });
+    console.error("callback background save error:", e);
   }
 });
 
