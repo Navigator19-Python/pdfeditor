@@ -1,3 +1,6 @@
+// frontend/src/app/onlyoffice/[docId]/page.js
+// Adds STABLE version in config request and trims ONLYOFFICE url.
+
 "use client";
 
 import { useEffect, useState } from "react";
@@ -54,9 +57,12 @@ export default function OnlyOfficePage() {
 
       const fileUrl = data?.onlyoffice?.docxUrl;
       if (!fileUrl) {
-        setErr("No DOCX URL found yet. Go back and upload/convert first.");
+        setErr("No DOCX URL found yet. Upload/convert first.");
         return;
       }
+
+      // ✅ stable version: prefer updatedAt.seconds, fallback to now
+      const version = data?.updatedAt?.seconds || Date.now();
 
       setStatus("Requesting ONLYOFFICE config…");
       const r = await fetch(`${BACKEND}/onlyoffice/config`, {
@@ -67,6 +73,7 @@ export default function OnlyOfficePage() {
           fileUrl,
           fileType: "docx",
           title: data.title || "Document",
+          version,
           user: { id: user.uid, name: user.email || "User" }
         })
       });
@@ -83,7 +90,7 @@ export default function OnlyOfficePage() {
       await loadScript(apiSrc);
 
       if (!window.DocsAPI) {
-        setErr("ONLYOFFICE DocsAPI not found after loading api.js. Tunnel URL may be down.");
+        setErr("ONLYOFFICE DocsAPI not found after loading api.js (check tunnel URL).");
         return;
       }
 
