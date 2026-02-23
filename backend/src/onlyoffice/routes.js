@@ -1,5 +1,7 @@
+// backend/src/onlyoffice/routes.js
+// CLEAN VERSION: JWT DISABLED MODE (no signing, no verification)
+
 import express from "express";
-import * as crypto from "crypto";            // ✅ IMPORTANT
 import fetch from "node-fetch";
 import { getFirebaseAdmin } from "./firebaseAdmin.js";
 import { Document, Packer, Paragraph, TextRun } from "docx";
@@ -8,7 +10,7 @@ export const onlyofficeRouter = express.Router();
 
 /**
  * POST /onlyoffice/config
- * Returns ONLYOFFICE DocEditor config + JWT token (if enabled).
+ * Returns ONLYOFFICE DocEditor config (NO JWT).
  */
 onlyofficeRouter.post("/config", async (req, res) => {
   try {
@@ -22,7 +24,7 @@ onlyofficeRouter.post("/config", async (req, res) => {
 
     const config = {
       document: {
-        fileType,
+        fileType, // "docx"
         key,
         title: title || "Document",
         url: fileUrl,
@@ -47,27 +49,20 @@ onlyofficeRouter.post("/config", async (req, res) => {
       }
     };
 
-    const secret = process.env.ONLYOFFICE_JWT_SECRET;
-
-    // ✅ Wrap token as { payload: config } for best compatibility
-    if (secret) {
-      const wrapped = { payload: config };
-      const token = signJwt(wrapped, secret);
-      config.token = token;
-      config.document.token = token;
-      config.editorConfig.token = token;
-    }
-
     return res.json(config);
   } catch (e) {
     console.error("config error:", e);
-    // ✅ return real error so you can see it in frontend/console
-    return res.status(500).json({ error: "Failed to build ONLYOFFICE config", details: String(e?.message || e) });
+    return res.status(500).json({
+      error: "Failed to build ONLYOFFICE config",
+      details: String(e?.message || e)
+    });
   }
 });
 
 /**
  * POST /onlyoffice/create-blank
+ * Creates a new blank DOCX in Firebase Storage:
+ * onlyoffice/{docId}/latest.docx
  */
 onlyofficeRouter.post("/create-blank", async (req, res) => {
   try {
@@ -103,7 +98,7 @@ onlyofficeRouter.post("/create-blank", async (req, res) => {
 
     const [signedUrl] = await file.getSignedUrl({
       action: "read",
-      expires: Date.now() + 1000 * 60 * 60 * 24 * 7
+      expires: Date.now() + 1000 * 60 * 60 * 24 * 7 // 7 days
     });
 
     await admin.firestore().collection("docs").doc(docId).set(
@@ -127,6 +122,12 @@ onlyofficeRouter.post("/create-blank", async (req, res) => {
 
 /**
  * POST /onlyoffice/convert/pdf-to-docx
+ * Converts PDF -> DOCX using ONLYOFFICE Conversion API:
+ * POST {ONLYOFFICE_URL}/converter
+ *
+ * NOTE: Since JWT is disabled on DocumentServer, we do NOT send tokens.
+ * ONLYOFFICE_URL should be reachable by your backend (Render). If EC2 is only reachable
+ * via Cloudflare tunnel, set ONLYOFFICE_URL to the tunnel URL.
  */
 onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
   try {
@@ -151,13 +152,6 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
       title: title || "source.pdf"
     };
 
-    const secret = process.env.ONLYOFFICE_JWT_SECRET;
-    let authHeader = {};
-    if (secret) {
-      const token = signJwt(payload, secret);
-      authHeader = { Authorization: `Bearer ${token}` };
-    }
-
     const converterUrl = `${String(onlyofficeUrl).trim().replace(/\/+$/, "")}/converter`;
 
     let result = null;
@@ -166,8 +160,7 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Accept": "application/json",
-          ...authHeader
+          "Accept": "application/json"
         },
         body: JSON.stringify(payload)
       });
@@ -176,11 +169,19 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
 
       if (!r.ok) {
         console.error("converter http error:", r.status, data);
-        return res.status(500).json({ ok: false, error: `Converter HTTP ${r.status}`, details: data });
+        return res.status(500).json({
+          ok: false,
+          error: `Converter HTTP ${r.status}`,
+          details: data
+        });
       }
 
       if (data?.error) {
-        return res.status(500).json({ ok: false, error: `Conversion error code: ${data.error}`, details: data });
+        return res.status(500).json({
+          ok: false,
+          error: `Conversion error code: ${data.error}`,
+          details: data
+        });
       }
 
       if (data?.endConvert) {
@@ -195,12 +196,17 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
       return res.status(504).json({ ok: false, error: "Conversion timeout (try again)" });
     }
 
+    // Download converted DOCX
     const docxResp = await fetch(result.fileUrl);
     if (!docxResp.ok) {
-      return res.status(500).json({ ok: false, error: `Failed to download converted DOCX (HTTP ${docxResp.status})` });
+      return res.status(500).json({
+        ok: false,
+        error: `Failed to download converted DOCX (HTTP ${docxResp.status})`
+      });
     }
     const buf = Buffer.from(await docxResp.arrayBuffer());
 
+    // Upload DOCX to Firebase Storage stable path
     const admin = getFirebaseAdmin();
     const bucket = admin.storage().bucket();
 
@@ -239,17 +245,14 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
 
 /**
  * POST /onlyoffice/callback
+ * ONLYOFFICE calls this to save updates. (NO JWT verification.)
  */
 onlyofficeRouter.post("/callback", async (req, res) => {
   try {
-    const secret = process.env.ONLYOFFICE_JWT_SECRET;
-    if (secret && !verifyOnlyOfficeJwt(req, secret)) {
-      return res.status(403).json({ error: 1 });
-    }
-
     const body = req.body || {};
     const status = body.status;
 
+    // 2 = MustSave, 6 = MustForceSave
     if (status === 2 || status === 6) {
       const downloadUrl = body.url;
       const key = body.key;
@@ -297,52 +300,6 @@ onlyofficeRouter.post("/callback", async (req, res) => {
   }
 });
 
-/* ---------- helpers ---------- */
-
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-function signJwt(payloadObj, secret) {
-  const header = { alg: "HS256", typ: "JWT" };
-  const b64 = (obj) =>
-    Buffer.from(JSON.stringify(obj))
-      .toString("base64")
-      .replace(/=/g, "")
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_");
-
-  const head = b64(header);
-  const body = b64(payloadObj);
-  const data = `${head}.${body}`;
-
-  const sig = crypto
-    .createHmac("sha256", secret)
-    .update(data)
-    .digest("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
-
-  return `${data}.${sig}`;
-}
-
-function verifyOnlyOfficeJwt(req, secret) {
-  const auth = req.headers.authorization || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-  if (!token) return false;
-
-  const [h, p, s] = token.split(".");
-  if (!h || !p || !s) return false;
-
-  const data = `${h}.${p}`;
-  const expected = crypto
-    .createHmac("sha256", secret)
-    .update(data)
-    .digest("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
-
-  return expected === s;
 }
