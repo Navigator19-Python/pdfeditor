@@ -78,7 +78,8 @@ export default function OnlyOfficePage() {
       }
 
       setStatus("Loading ONLYOFFICE API…");
-      const apiSrc = `${ONLYOFFICE_URL}/web-apps/apps/api/documents/api.js`;
+      const base = String(ONLYOFFICE_URL || "").trim().replace(/\/+$/, "");
+      const apiSrc = `${base}/web-apps/apps/api/documents/api.js`;
       await loadScript(apiSrc);
 
       if (!window.DocsAPI) {
