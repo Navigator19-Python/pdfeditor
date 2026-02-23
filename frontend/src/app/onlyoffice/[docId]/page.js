@@ -13,6 +13,7 @@ export default function OnlyOfficePage() {
   const { docId } = useParams();
   const router = useRouter();
   const [user, setUser] = useState(undefined);
+  const [status, setStatus] = useState("Loading…");
   const [err, setErr] = useState("");
 
   useEffect(() => {
@@ -29,12 +30,22 @@ export default function OnlyOfficePage() {
     (async () => {
       setErr("");
 
-      // 1) Load doc info
+      if (!BACKEND) {
+        setErr("Missing NEXT_PUBLIC_BACKEND_URL in Vercel env vars.");
+        return;
+      }
+      if (!ONLYOFFICE_URL) {
+        setErr("Missing NEXT_PUBLIC_ONLYOFFICE_URL in Vercel env vars.");
+        return;
+      }
+
+      setStatus("Reading document info…");
       const snap = await getDoc(doc(db, "docs", docId));
       if (!snap.exists()) {
         setErr("Document not found.");
         return;
       }
+
       const data = snap.data();
       if (data.ownerUid !== user.uid) {
         setErr("Not allowed.");
@@ -43,11 +54,11 @@ export default function OnlyOfficePage() {
 
       const fileUrl = data?.onlyoffice?.docxUrl;
       if (!fileUrl) {
-        setErr("This document has no DOCX yet. Go back and upload a DOCX or create blank.");
+        setErr("No DOCX URL found yet. Go back and upload/convert first.");
         return;
       }
 
-      // 2) Ask backend for config (it will include token)
+      setStatus("Requesting ONLYOFFICE config…");
       const r = await fetch(`${BACKEND}/onlyoffice/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -60,38 +71,40 @@ export default function OnlyOfficePage() {
         })
       });
 
-      const config = await r.json();
+      const config = await r.json().catch(() => ({}));
       if (!r.ok) {
-        setErr("Failed to get ONLYOFFICE config from backend.");
+        setErr(config?.error || `Backend config failed (HTTP ${r.status}).`);
         return;
       }
 
-      // 3) Load ONLYOFFICE api.js
-      await loadScript(`${ONLYOFFICE_URL}/web-apps/apps/api/documents/api.js`);
+      setStatus("Loading ONLYOFFICE API…");
+      const apiSrc = `${ONLYOFFICE_URL}/web-apps/apps/api/documents/api.js`;
+      await loadScript(apiSrc);
 
-      // 4) Mount editor
       if (!window.DocsAPI) {
-        setErr("ONLYOFFICE DocsAPI not available (check ONLYOFFICE URL).");
+        setErr("ONLYOFFICE DocsAPI not found after loading api.js. Tunnel URL may be down.");
         return;
       }
 
-      // Clear previous editor if any
+      setStatus("Starting editor…");
       const holder = document.getElementById("onlyoffice-editor");
       if (holder) holder.innerHTML = "";
 
       // eslint-disable-next-line no-new
       new window.DocsAPI.DocEditor("onlyoffice-editor", config);
+
+      setStatus("Editor running.");
     })().catch((e) => {
       console.error(e);
-      setErr("Failed to open ONLYOFFICE editor.");
+      setErr(e?.message || "Failed to open ONLYOFFICE editor.");
     });
   }, [docId, user]);
 
   return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
-      <div style={{ padding: 10, background: "white", borderBottom: "1px solid #e5e7eb", display: "flex", gap: 10 }}>
+      <div style={{ padding: 10, background: "white", borderBottom: "1px solid #e5e7eb", display: "flex", gap: 10, alignItems: "center" }}>
         <button onClick={() => router.push("/dashboard")} style={btn}>← Back</button>
-        <div style={{ color: "#666", fontSize: 13 }}>Editing in ONLYOFFICE</div>
+        <div style={{ color: "#444", fontSize: 13 }}>{status}</div>
       </div>
 
       {err ? <div style={{ padding: 12, color: "crimson" }}>{err}</div> : null}
@@ -109,9 +122,15 @@ function loadScript(src) {
     const s = document.createElement("script");
     s.src = src;
     s.onload = resolve;
-    s.onerror = reject;
+    s.onerror = () => reject(new Error(`Failed to load script: ${src}`));
     document.body.appendChild(s);
   });
 }
 
-const btn = { padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd", background: "white", cursor: "pointer" };
+const btn = {
+  padding: "8px 10px",
+  borderRadius: 10,
+  border: "1px solid #ddd",
+  background: "white",
+  cursor: "pointer"
+};
