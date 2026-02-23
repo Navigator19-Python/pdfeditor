@@ -1,5 +1,5 @@
 // backend/src/onlyoffice/routes.js
-// CLEAN VERSION: JWT DISABLED MODE (no signing, no verification)
+// CLEAN + STABLE KEY + FORCE EDIT MODE (JWT OFF)
 
 import express from "express";
 import fetch from "node-fetch";
@@ -10,19 +10,24 @@ export const onlyofficeRouter = express.Router();
 
 /**
  * POST /onlyoffice/config
- * Returns ONLYOFFICE DocEditor config (NO JWT).
+ * Frontend sends: { docId, fileUrl, fileType, title, user, version }
+ * We use a STABLE key: `${docId}:${version}` to avoid rights/state issues.
  */
 onlyofficeRouter.post("/config", async (req, res) => {
   try {
-    const { docId, fileUrl, fileType, title, user } = req.body || {};
+    const { docId, fileUrl, fileType, title, user, version } = req.body || {};
     if (!docId || !fileUrl || !fileType) {
       return res.status(400).json({ error: "docId, fileUrl, fileType required" });
     }
 
     const callbackUrl = `${process.env.PUBLIC_BASE_URL}/onlyoffice/callback`;
-    const key = `${docId}:${Date.now()}`;
+
+    // ✅ Stable key (do NOT use Date.now() here)
+    const stableVersion = String(version || "v1");
+    const key = `${docId}:${stableVersion}`;
 
     const config = {
+      documentType: "text",
       document: {
         fileType, // "docx"
         key,
@@ -38,13 +43,15 @@ onlyofficeRouter.post("/config", async (req, res) => {
           copy: true
         }
       },
-      documentType: "text",
       editorConfig: {
         mode: "edit",
         callbackUrl,
         user: {
           id: String(user?.id || "1"),
           name: String(user?.name || "User")
+        },
+        customization: {
+          forcesave: true
         }
       }
     };
@@ -61,8 +68,7 @@ onlyofficeRouter.post("/config", async (req, res) => {
 
 /**
  * POST /onlyoffice/create-blank
- * Creates a new blank DOCX in Firebase Storage:
- * onlyoffice/{docId}/latest.docx
+ * Creates onlyoffice/{docId}/latest.docx in Firebase Storage and sets Firestore.
  */
 onlyofficeRouter.post("/create-blank", async (req, res) => {
   try {
@@ -98,7 +104,7 @@ onlyofficeRouter.post("/create-blank", async (req, res) => {
 
     const [signedUrl] = await file.getSignedUrl({
       action: "read",
-      expires: Date.now() + 1000 * 60 * 60 * 24 * 7 // 7 days
+      expires: Date.now() + 1000 * 60 * 60 * 24 * 7
     });
 
     await admin.firestore().collection("docs").doc(docId).set(
@@ -122,12 +128,8 @@ onlyofficeRouter.post("/create-blank", async (req, res) => {
 
 /**
  * POST /onlyoffice/convert/pdf-to-docx
- * Converts PDF -> DOCX using ONLYOFFICE Conversion API:
- * POST {ONLYOFFICE_URL}/converter
- *
- * NOTE: Since JWT is disabled on DocumentServer, we do NOT send tokens.
- * ONLYOFFICE_URL should be reachable by your backend (Render). If EC2 is only reachable
- * via Cloudflare tunnel, set ONLYOFFICE_URL to the tunnel URL.
+ * Converts PDF -> DOCX using ONLYOFFICE Conversion API.
+ * ONLYOFFICE_URL should be reachable from Render (use EC2 public IP for backend calls).
  */
 onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
   try {
@@ -158,10 +160,7 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
     for (let i = 0; i < 40; i++) {
       const r = await fetch(converterUrl, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json"
-        },
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify(payload)
       });
 
@@ -169,19 +168,11 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
 
       if (!r.ok) {
         console.error("converter http error:", r.status, data);
-        return res.status(500).json({
-          ok: false,
-          error: `Converter HTTP ${r.status}`,
-          details: data
-        });
+        return res.status(500).json({ ok: false, error: `Converter HTTP ${r.status}`, details: data });
       }
 
       if (data?.error) {
-        return res.status(500).json({
-          ok: false,
-          error: `Conversion error code: ${data.error}`,
-          details: data
-        });
+        return res.status(500).json({ ok: false, error: `Conversion error code: ${data.error}`, details: data });
       }
 
       if (data?.endConvert) {
@@ -196,17 +187,12 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
       return res.status(504).json({ ok: false, error: "Conversion timeout (try again)" });
     }
 
-    // Download converted DOCX
     const docxResp = await fetch(result.fileUrl);
     if (!docxResp.ok) {
-      return res.status(500).json({
-        ok: false,
-        error: `Failed to download converted DOCX (HTTP ${docxResp.status})`
-      });
+      return res.status(500).json({ ok: false, error: `Failed to download converted DOCX (HTTP ${docxResp.status})` });
     }
     const buf = Buffer.from(await docxResp.arrayBuffer());
 
-    // Upload DOCX to Firebase Storage stable path
     const admin = getFirebaseAdmin();
     const bucket = admin.storage().bucket();
 
@@ -245,14 +231,13 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
 
 /**
  * POST /onlyoffice/callback
- * ONLYOFFICE calls this to save updates. (NO JWT verification.)
+ * Saves changes back to Firebase Storage (JWT OFF, no verification).
  */
 onlyofficeRouter.post("/callback", async (req, res) => {
   try {
     const body = req.body || {};
     const status = body.status;
 
-    // 2 = MustSave, 6 = MustForceSave
     if (status === 2 || status === 6) {
       const downloadUrl = body.url;
       const key = body.key;
