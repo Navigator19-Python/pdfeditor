@@ -1,20 +1,14 @@
 import express from "express";
-import crypto from "crypto";
+import * as crypto from "crypto";            // ✅ IMPORTANT
 import fetch from "node-fetch";
 import { getFirebaseAdmin } from "./firebaseAdmin.js";
 import { Document, Packer, Paragraph, TextRun } from "docx";
 
 export const onlyofficeRouter = express.Router();
 
-function secretHash(secret) {
-  return crypto.createHash("sha256").update(secret).digest("hex").slice(0, 12);
-}
-
 /**
  * POST /onlyoffice/config
  * Returns ONLYOFFICE DocEditor config + JWT token (if enabled).
- * IMPORTANT: we explicitly enable edit permissions + mode="edit"
- * to avoid "You do not have rights" popup.
  */
 onlyofficeRouter.post("/config", async (req, res) => {
   try {
@@ -54,19 +48,11 @@ onlyofficeRouter.post("/config", async (req, res) => {
     };
 
     const secret = process.env.ONLYOFFICE_JWT_SECRET;
-    if (secret) {
-      const token = signJwt(wrapped, secret);
-      config.token = token;
-      config.document.token = token;
-      config.editorConfig.token = token
-    }
 
-    // ✅ IMPORTANT: wrap inside { payload: ... }
+    // ✅ Wrap token as { payload: config } for best compatibility
     if (secret) {
       const wrapped = { payload: config };
       const token = signJwt(wrapped, secret);
-
-      // Put token in all common places (covers more DS versions)
       config.token = token;
       config.document.token = token;
       config.editorConfig.token = token;
@@ -75,14 +61,13 @@ onlyofficeRouter.post("/config", async (req, res) => {
     return res.json(config);
   } catch (e) {
     console.error("config error:", e);
-    return res.status(500).json({ error: "Failed to build ONLYOFFICE config" });
+    // ✅ return real error so you can see it in frontend/console
+    return res.status(500).json({ error: "Failed to build ONLYOFFICE config", details: String(e?.message || e) });
   }
 });
 
 /**
  * POST /onlyoffice/create-blank
- * Generates a blank DOCX and uploads it to Firebase Storage:
- * onlyoffice/{docId}/latest.docx
  */
 onlyofficeRouter.post("/create-blank", async (req, res) => {
   try {
@@ -118,7 +103,7 @@ onlyofficeRouter.post("/create-blank", async (req, res) => {
 
     const [signedUrl] = await file.getSignedUrl({
       action: "read",
-      expires: Date.now() + 1000 * 60 * 60 * 24 * 7 // 7 days (more stable)
+      expires: Date.now() + 1000 * 60 * 60 * 24 * 7
     });
 
     await admin.firestore().collection("docs").doc(docId).set(
@@ -136,14 +121,12 @@ onlyofficeRouter.post("/create-blank", async (req, res) => {
     return res.json({ ok: true, docxPath: objectPath, docxUrl: signedUrl });
   } catch (e) {
     console.error("create-blank error:", e);
-    return res.status(500).json({ ok: false, error: e?.message || "Failed to create blank DOCX" });
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
 /**
  * POST /onlyoffice/convert/pdf-to-docx
- * Converts a PDF (URL) -> DOCX using ONLYOFFICE Conversion API:
- * POST {ONLYOFFICE_URL}/converter
  */
 onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
   try {
@@ -152,7 +135,7 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
       return res.status(400).json({ ok: false, error: "docId and pdfUrl required" });
     }
 
-    const onlyofficeUrl = process.env.ONLYOFFICE_URL; // e.g. https://....trycloudflare.com OR http://EC2_IP:8080
+    const onlyofficeUrl = process.env.ONLYOFFICE_URL;
     if (!onlyofficeUrl) {
       return res.status(500).json({ ok: false, error: "Missing ONLYOFFICE_URL env var" });
     }
@@ -168,7 +151,6 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
       title: title || "source.pdf"
     };
 
-    // JWT: DocumentServer expects Authorization header (Bearer)
     const secret = process.env.ONLYOFFICE_JWT_SECRET;
     let authHeader = {};
     if (secret) {
@@ -176,9 +158,8 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
       authHeader = { Authorization: `Bearer ${token}` };
     }
 
-    const converterUrl = `${String(onlyofficeUrl).replace(/\/+$/, "")}/converter`;
+    const converterUrl = `${String(onlyofficeUrl).trim().replace(/\/+$/, "")}/converter`;
 
-    // Poll until endConvert=true (~60s)
     let result = null;
     for (let i = 0; i < 40; i++) {
       const r = await fetch(converterUrl, {
@@ -195,20 +176,11 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
 
       if (!r.ok) {
         console.error("converter http error:", r.status, data);
-        return res.status(500).json({
-          ok: false,
-          error: `Converter HTTP ${r.status}`,
-          details: data
-        });
+        return res.status(500).json({ ok: false, error: `Converter HTTP ${r.status}`, details: data });
       }
 
       if (data?.error) {
-        console.error("converter conversion error:", data);
-        return res.status(500).json({
-          ok: false,
-          error: `Conversion error code: ${data.error}`,
-          details: data
-        });
+        return res.status(500).json({ ok: false, error: `Conversion error code: ${data.error}`, details: data });
       }
 
       if (data?.endConvert) {
@@ -223,17 +195,12 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
       return res.status(504).json({ ok: false, error: "Conversion timeout (try again)" });
     }
 
-    // Download converted DOCX
     const docxResp = await fetch(result.fileUrl);
     if (!docxResp.ok) {
-      return res.status(500).json({
-        ok: false,
-        error: `Failed to download converted DOCX (HTTP ${docxResp.status})`
-      });
+      return res.status(500).json({ ok: false, error: `Failed to download converted DOCX (HTTP ${docxResp.status})` });
     }
     const buf = Buffer.from(await docxResp.arrayBuffer());
 
-    // Upload DOCX to Firebase Storage stable path
     const admin = getFirebaseAdmin();
     const bucket = admin.storage().bucket();
 
@@ -245,13 +212,11 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
       resumable: false
     });
 
-    // Signed URL for ONLYOFFICE to read
     const [signedUrl] = await file.getSignedUrl({
       action: "read",
-      expires: Date.now() + 1000 * 60 * 60 * 24 * 7 // 7 days
+      expires: Date.now() + 1000 * 60 * 60 * 24 * 7
     });
 
-    // Update Firestore
     await admin.firestore().collection("docs").doc(docId).set(
       {
         onlyoffice: {
@@ -268,14 +233,12 @@ onlyofficeRouter.post("/convert/pdf-to-docx", async (req, res) => {
     return res.json({ ok: true, docxPath: objectPath, docxUrl: signedUrl });
   } catch (e) {
     console.error("pdf-to-docx error:", e);
-    return res.status(500).json({ ok: false, error: e?.message || "pdf-to-docx failed" });
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
 /**
  * POST /onlyoffice/callback
- * ONLYOFFICE calls this to save updated file.
- * We verify JWT from Authorization header.
  */
 onlyofficeRouter.post("/callback", async (req, res) => {
   try {
@@ -287,20 +250,17 @@ onlyofficeRouter.post("/callback", async (req, res) => {
     const body = req.body || {};
     const status = body.status;
 
-    // 2 = MustSave, 6 = MustForceSave
     if (status === 2 || status === 6) {
       const downloadUrl = body.url;
-      const key = body.key; // "docId:timestamp"
+      const key = body.key;
       if (!downloadUrl || !key) return res.json({ error: 0 });
 
       const docId = String(key).split(":")[0];
 
-      // Download updated DOCX
       const r = await fetch(downloadUrl);
       if (!r.ok) throw new Error(`Failed to download updated file: ${r.status}`);
       const buf = Buffer.from(await r.arrayBuffer());
 
-      // Upload to Firebase Storage stable path
       const admin = getFirebaseAdmin();
       const bucket = admin.storage().bucket();
 
@@ -312,13 +272,11 @@ onlyofficeRouter.post("/callback", async (req, res) => {
         resumable: false
       });
 
-      // Signed URL for reading
       const [signedUrl] = await file.getSignedUrl({
         action: "read",
-        expires: Date.now() + 1000 * 60 * 60 * 24 * 7 // 7 days
+        expires: Date.now() + 1000 * 60 * 60 * 24 * 7
       });
 
-      // Update Firestore with latest URL
       await admin.firestore().collection("docs").doc(docId).set(
         {
           onlyoffice: {
@@ -339,15 +297,12 @@ onlyofficeRouter.post("/callback", async (req, res) => {
   }
 });
 
-/* ---------------- helpers ---------------- */
+/* ---------- helpers ---------- */
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/**
- * HS256 JWT signing (no extra libs).
- */
 function signJwt(payloadObj, secret) {
   const header = { alg: "HS256", typ: "JWT" };
   const b64 = (obj) =>
@@ -372,9 +327,6 @@ function signJwt(payloadObj, secret) {
   return `${data}.${sig}`;
 }
 
-/**
- * Verify JWT from Authorization: Bearer <token>.
- */
 function verifyOnlyOfficeJwt(req, secret) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
