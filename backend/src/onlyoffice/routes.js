@@ -6,6 +6,10 @@ import { Document, Packer, Paragraph, TextRun } from "docx";
 
 export const onlyofficeRouter = express.Router();
 
+function secretHash(secret) {
+  return crypto.createHash("sha256").update(secret).digest("hex").slice(0, 12);
+}
+
 /**
  * POST /onlyoffice/config
  * Returns ONLYOFFICE DocEditor config + JWT token (if enabled).
@@ -50,6 +54,12 @@ onlyofficeRouter.post("/config", async (req, res) => {
     };
 
     const secret = process.env.ONLYOFFICE_JWT_SECRET;
+    if (secret) {
+      const token = signJwt(wrapped, secret);
+      config.token = token;
+      config.document.token = token;
+      config.editorConfig.token = token
+    }
 
     // ✅ IMPORTANT: wrap inside { payload: ... }
     if (secret) {
