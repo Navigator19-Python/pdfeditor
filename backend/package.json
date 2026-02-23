@@ -1,13 +1,8 @@
 {
-  "name": "pdf-onlyoffice-backend",
-  "version": "1.0.0",
   "type": "module",
-  "main": "src/index.js",
-  "scripts": {
-    "start": "node src/index.js"
-  },
   "dependencies": {
     "cors": "^2.8.5",
+    "docx": "^8.5.0",
     "express": "^4.19.2",
     "firebase-admin": "^12.5.0",
     "node-fetch": "^3.3.2"
