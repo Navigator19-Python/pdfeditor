@@ -1,5 +1,5 @@
 // frontend/src/app/onlyoffice/[docId]/page.js
-// Adds STABLE version in config request and trims ONLYOFFICE url.
+// Sends a stable version to backend so ONLYOFFICE key is stable.
 
 "use client";
 
@@ -33,35 +33,20 @@ export default function OnlyOfficePage() {
     (async () => {
       setErr("");
 
-      if (!BACKEND) {
-        setErr("Missing NEXT_PUBLIC_BACKEND_URL in Vercel env vars.");
-        return;
-      }
-      if (!ONLYOFFICE_URL) {
-        setErr("Missing NEXT_PUBLIC_ONLYOFFICE_URL in Vercel env vars.");
-        return;
-      }
+      if (!BACKEND) return setErr("Missing NEXT_PUBLIC_BACKEND_URL in Vercel env vars.");
+      if (!ONLYOFFICE_URL) return setErr("Missing NEXT_PUBLIC_ONLYOFFICE_URL in Vercel env vars.");
 
       setStatus("Reading document info…");
       const snap = await getDoc(doc(db, "docs", docId));
-      if (!snap.exists()) {
-        setErr("Document not found.");
-        return;
-      }
+      if (!snap.exists()) return setErr("Document not found.");
 
       const data = snap.data();
-      if (data.ownerUid !== user.uid) {
-        setErr("Not allowed.");
-        return;
-      }
+      if (data.ownerUid !== user.uid) return setErr("Not allowed.");
 
       const fileUrl = data?.onlyoffice?.docxUrl;
-      if (!fileUrl) {
-        setErr("No DOCX URL found yet. Upload/convert first.");
-        return;
-      }
+      if (!fileUrl) return setErr("No DOCX URL found yet. Upload/convert first.");
 
-      // ✅ stable version: prefer updatedAt.seconds, fallback to now
+      // ✅ stable version
       const version = data?.updatedAt?.seconds || Date.now();
 
       setStatus("Requesting ONLYOFFICE config…");
@@ -79,20 +64,14 @@ export default function OnlyOfficePage() {
       });
 
       const config = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        setErr(config?.error || `Backend config failed (HTTP ${r.status}).`);
-        return;
-      }
+      if (!r.ok) return setErr(config?.error || `Backend config failed (HTTP ${r.status}).`);
 
       setStatus("Loading ONLYOFFICE API…");
       const base = String(ONLYOFFICE_URL || "").trim().replace(/\/+$/, "");
       const apiSrc = `${base}/web-apps/apps/api/documents/api.js`;
       await loadScript(apiSrc);
 
-      if (!window.DocsAPI) {
-        setErr("ONLYOFFICE DocsAPI not found after loading api.js (check tunnel URL).");
-        return;
-      }
+      if (!window.DocsAPI) return setErr("ONLYOFFICE DocsAPI not found after loading api.js (check tunnel URL).");
 
       setStatus("Starting editor…");
       const holder = document.getElementById("onlyoffice-editor");
@@ -116,7 +95,6 @@ export default function OnlyOfficePage() {
       </div>
 
       {err ? <div style={{ padding: 12, color: "crimson" }}>{err}</div> : null}
-
       <div id="onlyoffice-editor" style={{ flex: 1, width: "100%" }} />
     </div>
   );
