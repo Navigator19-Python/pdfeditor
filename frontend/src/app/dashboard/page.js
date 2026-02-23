@@ -67,8 +67,12 @@ export default function Dashboard() {
         body: JSON.stringify({ docId: d.id, title: "Untitled" })
       });
 
-      const data = await r.json();
-      if (!r.ok || !data.ok) throw new Error(data?.error || "create-blank failed");
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.ok) {
+        console.log("create-blank error:", r.status, data);
+        setMsg(data?.error || `Create blank failed (HTTP ${r.status})`);
+        return;
+      }
 
       await updateDoc(docRef(db, "docs", d.id), {
         onlyoffice: { docxPath: data.docxPath, docxUrl: data.docxUrl },
@@ -78,17 +82,24 @@ export default function Dashboard() {
       router.push(`/onlyoffice/${d.id}`);
     } catch (e) {
       console.error(e);
-      setMsg("Failed to create blank document (check backend env & logs).");
+      setMsg(e?.message || "Create blank failed. Check backend logs.");
     } finally {
       setBusy(false);
+      if (user) refresh(user).catch(() => {});
     }
   }
 
   async function uploadFileAndOpen(file) {
     setBusy(true);
     setMsg("");
+
     try {
-      const name = file.name.toLowerCase();
+      if (!BACKEND) {
+        setMsg("Missing NEXT_PUBLIC_BACKEND_URL in Vercel env vars.");
+        return;
+      }
+
+      const name = (file?.name || "").toLowerCase();
       const isPdf = name.endsWith(".pdf");
       const isDocx = name.endsWith(".docx");
 
@@ -107,7 +118,7 @@ export default function Dashboard() {
 
       const docId = docSnap.id;
 
-      // 2) Upload file
+      // 2) Upload file to Firebase Storage
       const objectPath = isPdf
         ? `uploads/${docId}/source.pdf`
         : `onlyoffice/${docId}/latest.docx`;
@@ -120,36 +131,46 @@ export default function Dashboard() {
           : "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       });
 
+      // This is the public-ish download URL from Firebase
       const url = await getDownloadURL(fileRef);
 
-      // If DOCX: save and open
+      // 3) If DOCX: save and open
       if (isDocx) {
         await updateDoc(docRef(db, "docs", docId), {
           onlyoffice: { docxPath: objectPath, docxUrl: url },
           updatedAt: serverTimestamp()
         });
+
         router.push(`/onlyoffice/${docId}`);
         return;
       }
 
-      // If PDF: convert to DOCX using backend + ONLYOFFICE conversion API
-      setMsg("Converting PDF to DOCX… (text PDFs work best)");
+      // 4) If PDF: call backend to convert PDF -> DOCX using ONLYOFFICE Conversion API
+      setMsg("Uploading done. Converting PDF to DOCX… (text PDFs work best)");
+
       const r = await fetch(`${BACKEND}/onlyoffice/convert/pdf-to-docx`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ docId, pdfUrl: url, title: file.name })
+        body: JSON.stringify({
+          docId,
+          pdfUrl: url,
+          title: file.name
+        })
       });
 
-      const data = await r.json();
+      const data = await r.json().catch(() => ({}));
+
       if (!r.ok || !data.ok) {
-        setMsg(data?.error || "PDF conversion failed.");
+        console.log("convert error:", r.status, data);
+        setMsg(data?.error || `Conversion failed (HTTP ${r.status}).`);
         return;
       }
 
+      // 5) Open editor
       router.push(`/onlyoffice/${docId}`);
     } catch (e) {
-      console.error(e);
-      setMsg("Upload/convert failed.");
+      console.error("upload/convert failed:", e);
+      setMsg(e?.message || "Upload/convert failed. Open DevTools console + check Render logs.");
     } finally {
       setBusy(false);
       if (user) refresh(user).catch(() => {});
@@ -189,11 +210,7 @@ export default function Dashboard() {
 
       <div style={{ marginTop: 18, display: "grid", gap: 12 }}>
         {docs.map((d) => (
-          <div
-            key={d.id}
-            style={card}
-            onClick={() => router.push(`/onlyoffice/${d.id}`)}
-          >
+          <div key={d.id} style={card} onClick={() => router.push(`/onlyoffice/${d.id}`)}>
             <div style={{ fontWeight: 800 }}>{d.title || "Untitled"}</div>
             <div style={{ color: "#666", fontSize: 13 }}>
               {d.onlyoffice?.docxUrl ? "Ready to edit" : "Waiting for DOCX"}
@@ -206,8 +223,40 @@ export default function Dashboard() {
   );
 }
 
-const btnPrimary = { padding: "10px 14px", borderRadius: 12, border: "none", background: "black", color: "white", cursor: "pointer" };
-const btnSecondary = { padding: "10px 14px", borderRadius: 12, border: "1px solid #111", background: "white", cursor: "pointer" };
-const btnGhost = { padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd", background: "white", cursor: "pointer" };
-const notice = { marginTop: 14, background: "#fff3cd", border: "1px solid #ffeeba", padding: 12, borderRadius: 12, color: "#6b4e00" };
-const card = { background: "white", padding: 14, borderRadius: 14, border: "1px solid #e5e7eb", cursor: "pointer" };
+const btnPrimary = {
+  padding: "10px 14px",
+  borderRadius: 12,
+  border: "none",
+  background: "black",
+  color: "white",
+  cursor: "pointer"
+};
+const btnSecondary = {
+  padding: "10px 14px",
+  borderRadius: 12,
+  border: "1px solid #111",
+  background: "white",
+  cursor: "pointer"
+};
+const btnGhost = {
+  padding: "8px 10px",
+  borderRadius: 10,
+  border: "1px solid #ddd",
+  background: "white",
+  cursor: "pointer"
+};
+const notice = {
+  marginTop: 14,
+  background: "#fff3cd",
+  border: "1px solid #ffeeba",
+  padding: 12,
+  borderRadius: 12,
+  color: "#6b4e00"
+};
+const card = {
+  background: "white",
+  padding: 14,
+  borderRadius: 14,
+  border: "1px solid #e5e7eb",
+  cursor: "pointer"
+};
