@@ -141,7 +141,7 @@ export default function Dashboard() {
           {busy ? "Working…" : "Upload DOCX → Open"}
           <input
             type="file"
-            accept=".docx"
+            accept=".pdf,.docx"
             style={{ display: "none" }}
             onChange={(e) => {
               const f = e.target.files?.[0];
@@ -174,3 +174,4 @@ const btnSecondary = { padding: "10px 14px", borderRadius: 12, border: "1px soli
 const btnGhost = { padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd", background: "white", cursor: "pointer" };
 const notice = { marginTop: 14, background: "#fff3cd", border: "1px solid #ffeeba", padding: 12, borderRadius: 12, color: "#6b4e00" };
 const card = { background: "white", padding: 14, borderRadius: 14, border: "1px solid #e5e7eb", cursor: "pointer" };
+
