@@ -1,4 +1,4 @@
-export const metadata = { title: "PDF Docs" };
+export const metadata = { title: "ONLYOFFICE Editor" };
 
 export default function RootLayout({ children }) {
   return (
