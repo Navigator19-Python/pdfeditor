@@ -3,9 +3,8 @@ import admin from "firebase-admin";
 export function getFirebaseAdmin() {
   if (admin.apps.length) return admin;
 
-  // Put your Firebase service account JSON into env as a single line string
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!raw) throw new Error("Missing FIREBASE_SERVICE_ACCOUNT_JSON env var");
+  if (!raw) throw new Error("Missing FIREBASE_SERVICE_ACCOUNT_JSON");
 
   const serviceAccount = JSON.parse(raw);
 
