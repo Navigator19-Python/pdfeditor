@@ -5,7 +5,17 @@ import { useRouter } from "next/navigation";
 import { watchAuth } from "../../lib/auth";
 import { auth, db, storage } from "../../lib/firebase";
 import { signOut } from "firebase/auth";
-import { addDoc, collection, getDocs, orderBy, query, serverTimestamp, updateDoc, where, doc as docRef } from "firebase/firestore";
+import {
+  addDoc,
+  collection,
+  doc as docRef,
+  getDocs,
+  orderBy,
+  query,
+  serverTimestamp,
+  updateDoc,
+  where
+} from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL;
@@ -44,26 +54,22 @@ export default function Dashboard() {
     setBusy(true);
     setMsg("");
     try {
-      // 1) Create doc record
       const d = await addDoc(collection(db, "docs"), {
         ownerUid: user.uid,
         title: "Untitled",
         createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        onlyoffice: { docxPath: null, docxUrl: null }
+        updatedAt: serverTimestamp()
       });
 
-      // 2) Ask backend to generate & upload a blank docx to Firebase Storage
       const r = await fetch(`${BACKEND}/onlyoffice/create-blank`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ docId: d.id, title: "Untitled" })
       });
 
-      if (!r.ok) throw new Error("create-blank failed");
       const data = await r.json();
+      if (!r.ok || !data.ok) throw new Error(data?.error || "create-blank failed");
 
-      // 3) Update Firestore with docxUrl/path returned by backend
       await updateDoc(docRef(db, "docs", d.id), {
         onlyoffice: { docxPath: data.docxPath, docxUrl: data.docxUrl },
         updatedAt: serverTimestamp()
@@ -72,54 +78,81 @@ export default function Dashboard() {
       router.push(`/onlyoffice/${d.id}`);
     } catch (e) {
       console.error(e);
-      setMsg("Failed to create blank doc. Check backend logs/env.");
+      setMsg("Failed to create blank document (check backend env & logs).");
     } finally {
       setBusy(false);
     }
   }
 
-  async function uploadDocxAndOpen(file) {
+  async function uploadFileAndOpen(file) {
     setBusy(true);
     setMsg("");
     try {
-      if (!file.name.toLowerCase().endsWith(".docx")) {
-        setMsg("Upload a .docx file for best results.");
-        setBusy(false);
+      const name = file.name.toLowerCase();
+      const isPdf = name.endsWith(".pdf");
+      const isDocx = name.endsWith(".docx");
+
+      if (!isPdf && !isDocx) {
+        setMsg("Upload a PDF or DOCX.");
         return;
       }
 
       // 1) Create Firestore doc
       const docSnap = await addDoc(collection(db, "docs"), {
         ownerUid: user.uid,
-        title: file.name.replace(/\.docx$/i, ""),
+        title: file.name.replace(/\.(pdf|docx)$/i, ""),
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
 
       const docId = docSnap.id;
 
-      // 2) Upload to a stable path (backend callback overwrites this)
-      const objectPath = `onlyoffice/${docId}/latest.docx`;
+      // 2) Upload file
+      const objectPath = isPdf
+        ? `uploads/${docId}/source.pdf`
+        : `onlyoffice/${docId}/latest.docx`;
+
       const fileRef = ref(storage, objectPath);
 
       await uploadBytes(fileRef, file, {
-        contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        contentType: isPdf
+          ? "application/pdf"
+          : "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       });
 
       const url = await getDownloadURL(fileRef);
 
-      // 3) Save docxUrl/path
-      await updateDoc(docRef(db, "docs", docId), {
-        onlyoffice: { docxPath: objectPath, docxUrl: url },
-        updatedAt: serverTimestamp()
+      // If DOCX: save and open
+      if (isDocx) {
+        await updateDoc(docRef(db, "docs", docId), {
+          onlyoffice: { docxPath: objectPath, docxUrl: url },
+          updatedAt: serverTimestamp()
+        });
+        router.push(`/onlyoffice/${docId}`);
+        return;
+      }
+
+      // If PDF: convert to DOCX using backend + ONLYOFFICE conversion API
+      setMsg("Converting PDF to DOCX… (text PDFs work best)");
+      const r = await fetch(`${BACKEND}/onlyoffice/convert/pdf-to-docx`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ docId, pdfUrl: url, title: file.name })
       });
+
+      const data = await r.json();
+      if (!r.ok || !data.ok) {
+        setMsg(data?.error || "PDF conversion failed.");
+        return;
+      }
 
       router.push(`/onlyoffice/${docId}`);
     } catch (e) {
       console.error(e);
-      setMsg("Upload failed.");
+      setMsg("Upload/convert failed.");
     } finally {
       setBusy(false);
+      if (user) refresh(user).catch(() => {});
     }
   }
 
@@ -134,18 +167,18 @@ export default function Dashboard() {
 
       <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
         <button disabled={busy} onClick={createBlank} style={btnSecondary}>
-          {busy ? "Working…" : "+ New Blank Document"}
+          {busy ? "Working…" : "+ New Blank DOCX"}
         </button>
 
         <label style={btnPrimary}>
-          {busy ? "Working…" : "Upload DOCX → Open"}
+          {busy ? "Working…" : "Upload PDF/DOCX → Open"}
           <input
             type="file"
-            accept=".pdf,.docx"
+            accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             style={{ display: "none" }}
             onChange={(e) => {
               const f = e.target.files?.[0];
-              if (f) uploadDocxAndOpen(f);
+              if (f) uploadFileAndOpen(f);
               e.target.value = "";
             }}
           />
@@ -156,10 +189,14 @@ export default function Dashboard() {
 
       <div style={{ marginTop: 18, display: "grid", gap: 12 }}>
         {docs.map((d) => (
-          <div key={d.id} style={card} onClick={() => router.push(`/onlyoffice/${d.id}`)}>
-            <div style={{ fontWeight: 700 }}>{d.title || "Untitled"}</div>
+          <div
+            key={d.id}
+            style={card}
+            onClick={() => router.push(`/onlyoffice/${d.id}`)}
+          >
+            <div style={{ fontWeight: 800 }}>{d.title || "Untitled"}</div>
             <div style={{ color: "#666", fontSize: 13 }}>
-              {d.onlyoffice?.docxUrl ? "Ready" : "No DOCX yet"}
+              {d.onlyoffice?.docxUrl ? "Ready to edit" : "Waiting for DOCX"}
             </div>
           </div>
         ))}
@@ -174,4 +211,3 @@ const btnSecondary = { padding: "10px 14px", borderRadius: 12, border: "1px soli
 const btnGhost = { padding: "8px 10px", borderRadius: 10, border: "1px solid #ddd", background: "white", cursor: "pointer" };
 const notice = { marginTop: 14, background: "#fff3cd", border: "1px solid #ffeeba", padding: 12, borderRadius: 12, color: "#6b4e00" };
 const card = { background: "white", padding: 14, borderRadius: 14, border: "1px solid #e5e7eb", cursor: "pointer" };
-
