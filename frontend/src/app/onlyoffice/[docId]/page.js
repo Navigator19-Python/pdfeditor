@@ -1,6 +1,3 @@
-// frontend/src/app/onlyoffice/[docId]/page.js
-// Sends a stable version to backend so ONLYOFFICE key is stable.
-
 "use client";
 
 import { useEffect, useState } from "react";
@@ -46,19 +43,12 @@ export default function OnlyOfficePage() {
       const fileUrl = data?.onlyoffice?.docxUrl;
       if (!fileUrl) return setErr("No DOCX URL found yet. Upload/convert first.");
 
-      // ✅ stable version
-      const version = data?.updatedAt?.seconds || Date.now();
-
       setStatus("Requesting ONLYOFFICE config…");
       const r = await fetch(`${BACKEND}/onlyoffice/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           docId,
-          fileUrl,
-          fileType: "docx",
-          title: data.title || "Document",
-          version,
           user: { id: user.uid, name: user.email || "User" }
         })
       });
